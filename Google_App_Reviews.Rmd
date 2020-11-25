@@ -1,0 +1,981 @@
+---
+title:  "NLP: Google App Reviews"
+author: "Raquel Colorado"
+date:   "`r Sys.Date()`"
+output:
+  html_document: 
+    theme:       cosmo  # "default", "cerulean", "journal", "flatly", "readable", "spacelab", "united", "cosmo", "lumen", "paper", "sandstone", "simplex", "yeti"
+    highlight:   tango  # "default", "tango", "pygments", "kate", "monochrome", "espresso", "zenburn", "haddock", "textmate"
+    toc:         true
+    toc_float:   true
+  pdf_document:  default
+  word_document: default
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introducción
+
+Las App o aplicaciones que usamos en nuestros móviles, han crecido en número y en diversidad de forma exponencial a lo largo de los últimos años. Es por esto, que el hecho de que una aplicación destaque respecto a las demás, funcione de forma correcta y los usuarios le encuentren algún atractivo, resulta cada vez más complicado dentro de la amplia gama de aplicaciones que podemos encontrar y muchas veces, las instalamos para desinstalarlas al poco tiempo. 
+
+El objetivo en este Notebook es realizar una aproximación al análisis de las reseñas que aportan los usuarios de **Google Play**, empleando algunas técnicas de *Text Mining* y *Natural Language Processing*. De este modo, veremos algunos apartados como la limpieza de los datos, tokenización, wordcloud y análisis de sentimientos utilizando diversos métodos. 
+
+El origen de los datos se encuentra en un *dataset* de Kaggle creado por un usuario a través de Web scrapping (el enlace directo se encuentra en las referencias). 
+
+
+## Librerías, dependencias y carga de datos
+
+En primer lugar, preparamos las dependencias y librerías que vamos a necesitar a lo largo del notebook. También incluiremos una serie de formatos y colores personalizados para aplicar a nuestras tablas. 
+
+```{r message=FALSE}
+# Dependencias
+first_run <- FALSE 
+if(first_run == TRUE) {
+   install.packages(c("dplyr", "magrittr", "tidytext","textdata", "tidyr", "ggplot2", "igraph", "ggraph", "formattable", "knitr", "kableExtra", "wordcloud2", "RCurl", "udpipe", "forcats"), dependencies = TRUE )
+}
+library(devtools)
+if(!require(sentiment)) install_url("http://cran.r-project.org/src/contrib/Archive/sentiment/sentiment_0.2.tar.gz")
+
+```
+
+```{r message=FALSE}
+# Librerías
+library(dplyr)
+library(magrittr)
+library(tidytext)
+library(tidyr)
+library(ggplot2)
+library(igraph)
+library(ggraph)
+library(knitr)
+library(kableExtra)
+library(wordcloud2)
+library(RCurl)
+library(udpipe)
+library(sentiment)
+library(formattable)
+library(textdata)
+library(forcats)
+
+```
+
+```{r}
+# Definimos algunos colores
+my_colors <- c("palegreen2","paleturquoise","pink", "plum","skyblue","sienna1")
+
+# Personalizamos las tablas en formato HTML 
+my_kable_styling <- function(dat, caption) {
+  kable(dat, "html", escape = FALSE, caption = caption) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "bordered"),
+                full_width = FALSE, position = "center" )
+}
+
+
+
+```
+
+
+Los datos se encuentran en mi repositorio de github llamado *Text Mining*. Para leerlos es importante tener en cuenta que se hace uso de la librería RCurl (permite leer páginas https) y que debemos indicar la ruta de los archivos **Raw**. 
+
+```{r}
+# Lectura de datos
+x <- getURL("https://raw.githubusercontent.com/raquelcc7/textmining/main/googleplaystore.csv")
+gplay <- read.csv(text = x)
+
+y <- getURL("https://raw.githubusercontent.com/raquelcc7/textmining/main/googleplaystore_user_reviews.csv")
+greviews <- read.csv(text = y)
+```
+
+Unimos los dos archivos realizando una intersección (inner join) a través del nombre de las APP. 
+
+```{r}
+# Data.frame unido
+googledf <- merge(gplay, greviews, by = 'App')
+```
+
+## Análisis exploratorio
+
+Continuamos realizando un análisis exploratorio de los datos, viendo su estructura y algunos estadísticos descriptivos.
+
+
+```{r}
+# App 
+app<- unique(googledf$App) # Nombres distintos de APP
+app[1:10]  # Mostramos  las 10 primeras
+length(app) # Número  de APP distintas
+```
+
+Hemos obtenido los 10 primeros nombres de APP del conjunto de datos. El número de APP distintas con las que contamos es de 1020.
+
+```{r}
+# Columnas
+names(googledf) #Nombres de las columnas
+```
+
+Podemos ver la estructura de los datos y el tipo de variables que tenemos.
+
+```{r}
+# Estructura y tipo de variables
+str(googledf)
+```
+
+Contamos con más de 100.000 observaciones y 17 variables o columnas. En el conjunto de datos existen tres columnas que hacen referencia a los sentimientos sugeridos por cada reseña. Teniendo en cuenta nuestro objetivo, algunas columnas no las necesitaremos o no nos van a aportar demasiada información, por lo que  vamos a prescindir de algunas de ellas junto con las referidas a los sentimientos para obtener las nuestras propias, quedándonos, por tanto, simplemente con el nombre de la App y la reseña traducida al inglés.
+
+```{r}
+# Creamos nuevo data.frame con las columnas que necesitamos
+# Indicamos las columnas que queremos borrar
+borrar_col <- c("Reviews",  "Size", "Installs", "Type", "Price", "Content.Rating", "Genres" ,"Last.Updated",  "Current.Ver" , "Android.Ver","Sentiment" ,"Sentiment_Polarity","Sentiment_Subjectivity") 
+
+google.clean <- googledf[ , !(names(googledf) %in% borrar_col)] # Borramos y guardamos en nuevo data.frame
+
+names(google.clean) <- c('App', 'Category', 'Rating', 'Review') # Cambiamos el nombre  de las columnas
+
+head(google.clean) # Obtenemos los primeros datos del nuevo df
+```
+
+Las columnas con las que vamos a trabajar son:
+
+- App: el nombre de la App a la que hace referencia cada reseña
+- Category: la categoría a la que pertenece la App de la que se hace la reseña
+- Rating: la puntuación que recibe la App (oscila entre 0 y 5)
+- Review: el texto de la reseña
+
+Para poder realizar los siguientes pasos en menor tiempo  computacional, de las 1020 apps  distintas,  seleccionaremos 100 de ellas al azar.
+
+```{r}
+# Seleccionamos 100 apps aleatorias
+set.seed(1234)
+random.apps <- sample(app,100)
+
+# Creamos nuevo dataframe con sólo 100 apps distintas
+google1 <-  google.clean %>%
+  filter(App %in% random.apps)
+```
+
+De este modo, contamos con 10890 observaciones (reseñas) distintas.
+
+## Limpieza de datos y preprocesamiento
+
+Para realizar la limpieza del texto podríamos crear un objeto **corpus** utilizando el siguiente código (no se ejecutará en este caso) y aplicando las funciones de la librería *tm*.
+
+```{r}
+# Creamos el  corpus
+# google_corpus <- Corpus(VectorSource(google$Review))
+```
+
+Sin embargo, existe un paquete que surgió hace unos años, llamado **tidytext** que nos proporciona varias ventajas en nuestro caso. Ambos formatos contienen funciones prácticamente idénticas como la usada para eliminar *stopwords*, pero a diferencia de Corpus, con tidytext podemos usar, de forma sencilla, las expresiones de **dplyr**  cada vez más extendidas en R. 
+Además, podemos obtener un Document-Term Matrix al igual que con Corpus y ciertas funciones que no podríamos aplicar a un objeto SimpleCorpus, las podremos aplicar a un dataframe tokenizado en el que cada fila representa una palabra. Por último, como en este ejemplo no vamos a almacenar ningún metadato, el objeto Corpus no resulta esencial.
+
+### Limpieza básica
+
+En primer lugar, vamos a llevar a cabo una limpieza básica de las reseñas.
+Empezamos con las contracciones, muy usuales en el idioma anglosajón.$^*$
+
+$^*$ El código ha sido tomado de Debbie Liske de Data Camp, que usa la función gsub().
+
+```{r}
+# Función de expansión de contracciones en inglés
+fix.contractions <- function(doc) {
+  doc <- gsub("won't", "will not", doc)
+  doc <- gsub("can't", "can not", doc)
+  doc <- gsub("n't", " not", doc)
+  doc <- gsub("'ll", " will", doc)
+  doc <- gsub("'re", " are", doc)
+  doc <- gsub("'ve", " have", doc)
+  doc <- gsub("'m", " am", doc)
+  doc <- gsub("'d", " would", doc)
+  # 's could be 'is' or could be possessive: it has no expansion
+  doc <- gsub("'s", "", doc)
+  return(doc)
+}
+
+# Aplicamos la función a las reviews
+google2 <- google1
+google2$Review <- sapply(google2$Review, fix.contractions)
+```
+
+Quitamos también los caracteres no alfanuméricos, los NA y los signos de puntuación a través de funciones que aplicaremos al data.frame *google2*.
+
+```{r}
+# Caracteres especiales 
+removeSpecialChars <- function(x) gsub("[^a-zA-Z0-9 ]", " ", x)
+
+# Eliminamos  
+google2$Review <- sapply(google2$Review, removeSpecialChars)
+```
+
+Contamos los valores NA. 
+
+```{r}
+# Contamos NAs
+sapply(google2, function(x) sum(is.na(x)))
+```
+
+Como no contamos con valores NA no aplicamos ninguna función. Si exploramos la columna *Reviews*, podemos ver que aunque parece que no tenga NA's, sí que existen valores nan. Sin embargo, estos están registrados como caracter, es decir, si aplicamos la función: *is.nan(x)* tampoco aparecerá que contenga algún valor nan. Para solventar esto, indicaremos manualmente que se tratan de valores "nan" como caracter y prescindiremos de ellos
+
+```{r}
+# Nan
+google2 <- google2 %>% 
+                 mutate(Review = ifelse( Review == "nan", "", Review ))
+```
+
+Por último, limpiamos el texto de espacios, tabuladores, signos de puntuación.
+
+```{r}
+# Limpiamos el texto de tabuladores,espacios y signos de puntación
+removeTabulador <- function(x)gsub("[ \t]{2,}", "", x) # Tabuladores
+removeOther <- function(x) gsub("^\\s+|\\s+$", "", x) # Espacios en blanco
+removePunct <- function (x)gsub("[[:punct:]]", "",x) # Signos de puntuación
+
+# Eliminamos
+google2$Review <- sapply(google2$Review, removeTabulador)
+google2$Review <- sapply(google2$Review, removeOther)
+google2$Review <- sapply(google2$Review, removePunct)
+```
+
+Comparamos las reseñas iniciales del dataframe google1 con las finales de google2. 
+
+```{r}
+# Reseñas iniciales
+my_kable_styling(head(google1), "Reseñas iniciales")
+```
+
+
+```{r}
+# Reseñas finales
+my_kable_styling(head(google2), "Reseñas finales")
+```
+
+### Tidytext 
+
+Una vez realizada la limpieza básica, creamos un nuevo data.frame tokenizado. 
+
+```{r}
+# Tokenización: una palabra por fila
+tidy_google <- google2 %>%
+    unnest_tokens("word", Review)
+```
+
+Vemos el resultado y lo comparamos con lo que teníamos anteriormente
+
+```{r}
+# Inicial
+my_kable_styling(head(google2), "Reseñas sin tokenizar ")  
+```
+
+```{r}
+# Final
+my_kable_styling(head(tidy_google), "Reseñas tokenizadas")
+
+```
+
+Ahora cada palabra que compone una reseña tiene un índice asociado. Es decir, si una reseña contiene 3 palabras, como la primera del dataframe, cuando la tokenizamos, sus filas no se llamarán todas "1" sino que cada una tendrá su decimal asociado. En este caso: 1.0, 1.1, 1.2.
+Otro punto interesante es que al tokenizar, tidytext ha pasado  directamente a minúsculas todo el texto sin necesidad de especificarlo.
+
+Ahora vamos a realizar tres pasos más de limpieza: 
+
+1. Creamos una lista de palabras no deseadas que se han podido observar echando un vistazo a las reseñas.
+2. Eliminamos *stopwords*
+3. Eliminamos palabras con menos de 2 caracteres y con más de 10. 
+
+
+```{r}
+# Lista de palabras no deseadas
+
+undesirable_words <- c("review", "ad", "nan", "superb", "theres",  "yeah", "baby", 
+                       "alright", "wanna", "gonna", "whoa", "gotta", "make", "ooh",
+                       "uurh", " ai ", " ca ", " la ", "hey", " na ", " da ", 
+                       "tbh","p.s", "wow", "wooh", "woow", "i", "andriod")
+
+```
+
+Vamos a explorar algunas stopwords.
+
+```{r}
+# Primeras quince stopwords aleatorias
+head(sample(stop_words$word, 15), 15)
+```
+
+Vemos que se tratan de palabras que no nos aportan mucho en cuanto al objetivo del análisis. Por tanto, vamos a prescindir de ellas junto con las que contengan menos de 2 caracteres y las definidas en la lista de no deseadas (*undesirable_words*). 
+Esto lo realizamos creando un nuevo dataframe a partir del tokenizado *tidy_google*.
+
+```{r}
+# Eliminamos palabras no deseadas, stopwords y palabras cortas.
+google_filtered <- tidy_google %>%
+  select(word, App, Category, Rating)%>%
+  anti_join(stop_words) %>%
+  distinct() %>%
+  filter(!word %in% undesirable_words) %>%
+  filter(nchar(word) > 2) %>%
+  filter(nchar(word) < 10)
+```
+
+Exploramos la clase y las dimensiones de nuestro nuevo objeto *google_filtered*.
+
+```{r}
+# Clase
+class(google_filtered)
+# Dimensiones
+dim(google_filtered)
+```
+
+Vemos que se trata de un objeto de tipo dataframe y que contamos con 15578 filas o palabras y cuatro columnas (App, Category, Rating y Review).
+
+Podemos contar la ocurrencia de las palabras y ordenarlas de forma descendente. Vemos las 10 que más aparecen a lo largo de las reseñas. 
+
+```{r}
+# Contamos el nº de ocurrencias de las palabras y ordenamos de mayor a menor
+google_filtered %>%
+  count(word) %>%
+    arrange(desc(n)) %>%
+  top_n(10) # Mostramos las 10 que más aparecen
+
+```
+
+Vemos esta información gráficamente. 
+
+```{r}
+# Gráfico palabras más usadas
+google_filtered %>%
+  count(word, sort = TRUE) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot() +
+    geom_col(aes(word, n), fill = my_colors[4]) +
+    theme(legend.position = "none", 
+          plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank()) +
+    xlab("") + 
+    ylab("Nº de palabras") +
+    ggtitle("Palabras más usadas en Reviews") +
+    coord_flip()
+```
+
+La palabra que más aparece en las reviews es *love*. Podemos ver más información de esta palabra, consultando cuáles son algunas de las app que contienen *love* en sus reviews.
+
+```{r message=FALSE, warning=FALSE}
+# Consulta sobre la palabra love
+google_filtered %>% 
+  filter(word == "love") %>%
+  select(App, word, Category, Rating) %>%
+  arrange() %>%
+  top_n(10,App) %>%
+  mutate(App = color_tile("lightblue","lightblue")(App)) %>%
+  mutate(word = color_tile("lightpink","lightpink")(word)) %>%
+  kable("html", escape = FALSE, align = "c", caption = "10 Aplicaciones en las que aparece love") %>%
+  kable_styling(bootstrap_options = 
+                  c("striped", "condensed", "bordered"), 
+                  full_width = FALSE)
+```
+
+En esta tabla personalizada podemos ver 10 aplicaciones que tienen reseñas en las que aparece la palabra *love* junto con la categoría a la que pertenecen y la puntuación que obtienen. Podemos comprobar que se tratan de App diferentes entre sí y con valoraciones bastante altas. 
+
+También podemos usar un **wordcloud** para ver gráficamente las palabras que aparecen en las reviews. Limitamos a 300 el número de palabras que puede contener el wordcloud. Para ello usamos la función *wordcloud2* que nos permite realizar gráficos de nube de palabras dinámicos y llamativos. 
+
+```{r}
+# Conteo de palabras
+review_words_counts <- google_filtered %>%
+  count(word, sort = TRUE) 
+
+# Wordcloud 
+wordcloud2(review_words_counts[1:300, ], size = 0.4)
+```
+
+Las palabras que más destacan son justamente aquellas que ya habíamos visto que aparecían numerosas veces a lo largo de las reviews: love, time, app, update, nice, etc.
+
+## Análisis del texto
+
+Otro tipo de análisis que podemos realizar es el referente a los tipos de palabras que componen las reseñas en función de su **morfología**. Empezamos usando UPOS con el dataset que habíamos limpiado al inicio (sin tokenizar): *google2*. Como no estaban todas las palabras en minúsculas, primero pasamos todo a minúsculas y añadimos una columna llamada "id".
+
+
+```{r}
+# Pasamos a minúsculas 
+google2$Review <- sapply(google2$Review, tolower)
+google2$id <- rownames(google2)
+
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Datos
+data(google2)
+
+# Descargamos el modelo udpipe en inglés
+ud_model <- udpipe_download_model(language = "english")
+
+# Cargamos en la dirección de descarga (ud_model$file_model)
+ud_model <- udpipe_load_model(ud_model$file_model)
+
+# Creamos la anotación de las reseñas
+data_udpipe_anotado <- udpipe_annotate(ud_model,  
+                                       # El texto a tokenizar
+                                       x      = google2$Review,
+                                       # El id
+                                       doc_id = google2$id)
+
+# Lo convertimos a data.frame
+data_udpipe_anotado <- as.data.frame(data_udpipe_anotado)
+```
+
+Vemos un resumen de lo que tenemos en el nuevo dataframe.
+
+```{r}
+# Resumen
+summary(data_udpipe_anotado)
+```
+
+Con esta información podemos comprobar que existen dos variables llamadas lemma (la raíz de cada token del texto) y upos (partes de la oración).
+Vemos cuántos tipos de palabras tenemos según su morfología de forma ordenada: 
+
+```{r}
+# Número de palabras según su morfología
+table(data_udpipe_anotado$upos)[order(table(data_udpipe_anotado$upos))]
+```
+
+El mayor número lo encontramos en nombres, seguido por verbos, adjetivos y adverbios. Nos centraremos en los tres primeros, pero en primer lugar veremos esta información según la frecuencia de  cada tipo y lo graficaremos. 
+
+```{r}
+# Valores de upos con su frecuencia
+stats_upos     <- txt_freq(data_udpipe_anotado$upos)
+
+# Convertimos key en factor, ordenados de forma inversa
+stats_upos$key <- factor(stats_upos$key, levels = rev(stats_upos$key))
+
+#Gráfico
+stats_upos %>%
+ggplot() +
+    geom_col(aes(key,freq), fill = my_colors[2]) +
+    theme(legend.position = "none", 
+          plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank()) +
+    xlab("") + 
+    ylab("Frecuencia") +
+    ggtitle("UPOS (Universal Parts of Speech)\n por frecuencia") +
+    coord_flip()
+
+```
+
+Los sustantivos o nombres son el tipo de palabra más frecuente. Podemos ver cuáles son los sustantivos, verbos y adjetivos más comunes.
+
+```{r}
+## NOMBRES
+# Creamos objeto stats_nombres con los valores NOUN en data_udpipe_anotado
+
+stats_nombres <- subset(data_udpipe_anotado, upos %in% c("NOUN")) 
+
+# Frecuencia de cada nombre
+
+stats_nombres     <- txt_freq(stats_nombres$token)
+
+# Convertimos key en factor, ordenados de forma inversa
+
+stats_nombres$key <- factor(stats_nombres$key, levels = rev(stats_nombres$key))
+
+#Gráfico
+
+head(stats_nombres,20) %>%
+ggplot() +
+    geom_col(aes(key,freq), fill = my_colors[3]) +
+    theme(legend.position = "none", 
+          plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank()) +
+    xlab("") + 
+    ylab("Frecuencia") +
+    ggtitle("Sustantivos más comunes") +
+    coord_flip()
+
+```
+
+Los tres sustantivos que aparecen con mayor frecuencia son: game, ads y time. Si nos fijamos en el cuarto (ad), seguramente haga referencia a lo mismo que el segundo (ads), pero en singular.
+Si recordamos lo realizado con tidytext, la palabra *love* era la que más veces aparecía. En este caso, esta palabra no aparece como la más frecuente. Podría estar sucediendo que en el caso anterior no se diferenciaba entre love como verbo o como sustantivo.
+
+```{r}
+## VERBOS
+# Obtenemos los verbos
+stats_verbos     <- subset(data_udpipe_anotado, upos %in% c("VERB")) 
+
+# Frecuencia de cada verbo
+stats_verbos    <- txt_freq(stats_verbos$token)
+
+# Convertimos key en factor, ordenados de forma inversa
+stats_verbos$key <- factor(stats_verbos$key, levels = rev(stats_verbos$key))
+
+# Gráfico
+head(stats_verbos,20) %>%
+ggplot() +
+    geom_col(aes(key,freq), fill = my_colors[5]) +
+    theme(legend.position = "none", 
+          plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank()) +
+    xlab("") + 
+    ylab("Frecuencia") +
+    ggtitle("Verbos más comunes") +
+    coord_flip()
+```
+
+El verbo más frecuente es *get* seguido por *love*. Esto apunta a lo que se mencionaba en el párrafo anterior. 
+Por último en cuanto a este tipo de análisis, vemos la frecuencia de los adjetivos.
+
+```{r}
+## ADJETIVOS
+
+# Obtenemos los adjetivos
+stats_adjetivos     <- subset(data_udpipe_anotado, upos %in% c("ADJ")) 
+
+# Frecuencia de cada adjetivo
+stats_adjetivos     <- txt_freq(stats_adjetivos$token)
+
+# Convertimos key en factor, ordenados de forma inversa
+stats_adjetivos$key <- factor(stats_adjetivos$key, levels = rev(stats_adjetivos$key))
+
+# Gráfico
+head(stats_adjetivos,20) %>%
+ggplot() +
+    geom_col(aes(key,freq), fill = my_colors[6]) +
+    theme(legend.position = "none", 
+          plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank()) +
+    xlab("") + 
+    ylab("Frecuencia") +
+    ggtitle("Adjetivos más comunes") +
+    coord_flip()
+
+```
+
+Vemos que los dos primeros adjetivos más frecuentes son *great* y *good*, que hacen referencia a una valoración positiva, seguidos por *many*, que puede parecer algo más ambiguo en cuanto a su polaridad. 
+Empleando la misma  metodología que para las UPOS, podemos obtener combinaciones de palabras (keywords) a través de Rapid Automatic Keyword Extraction (RAKE). Nos centraremos en nombres y adjetivos aplicándoles la condición de que aparezcan juntos más de 3 veces. 
+
+
+```{r}
+## RAKE
+
+# Utilizamos la función keywords_rake con los datos data_udpipe_anotado
+stats_rake     <- keywords_rake(x  = data_udpipe_anotado, 
+                                
+                                # la columna lemma
+                                term     = "lemma", 
+                                
+                                # el id
+                                group    = "doc_id", 
+                                
+                                # una pista de si ese texto es relevante
+                                # en nuestro caso, si es un nombre o un adjetivo
+                                relevant = data_udpipe_anotado$upos %in% c("NOUN", "ADJ"))
+
+# Convertimos key en factor, ordenados de forma inversa
+stats_rake$key <- factor(stats_rake$keyword, levels = rev(stats_rake$keyword))
+
+# Gráfico
+head(subset(stats_rake, freq > 3),20) %>%
+ggplot() +
+    geom_col(aes(key,rake), fill = my_colors[1]) +
+    theme(legend.position = "none", 
+          plot.title = element_text(hjust = 0.5),
+          panel.grid.major = element_blank()) +
+    xlab("") + 
+    ylab("Frecuencia") +
+    ggtitle("Keywords") +
+    coord_flip()
+
+
+```
+
+Vemos que la combinación que más veces aparece es "terrible job" junto con "intrusive ad", lo cual puede parecer algo negativo en las reseñas de las App con las que estamos trabajando. 
+
+## Análisis de sentimientos
+
+En este apartado realizamos un análisis de los sentimientos a lo largo de las reseñas. El paquete *tidytext* proporciona una función llamada **sentiments** que contiene diferentes lexicon. Usaremos los tres siguientes: 
+
+- AFINN: asigna una puntuación entre -5 y 5 a cada palabra. Las palabras tienen una puntuación negativa si se asocian con sentimientos  negativos y una puntuación positiva si se asocian con sentimientos positivos. 
+
+- Bing: clasifica las palabras en categorías positivas o negativas. 
+
+- NRC: clasifica las palabras en una o varias categorías de las siguientes: positivo, negativo, ira, anticipación, disgusto, miedo, alegría, tristeza, sorpresa y confianza. 
+
+En primer lugar, exploramos los diferenes valores junto con el número de palabras que componen los tres lexicon creando un nuevo data.frame llamado *new_sentiments*. Para el lexicon **Afinn**, creamos una columna llamada "sentiment" e indicamos que si una palabra tiene asociado un valor negativo (menor que 0) lo llame "negative" y si tiene un valor positivo (mayor o igual a 0), lo llame "positive".
+
+
+```{r message=FALSE, warning=FALSE}
+# Lexicon AFINN
+afinn <- get_sentiments("afinn") %>%
+  mutate(sentiment = (ifelse(value >= 0, "positive", ifelse(value < 0, "negative", value)))) %>%
+  mutate(lexicon = "afinn", 
+         words_in_lexicon = n_distinct(word))
+
+# Lexicon bing
+bing <- get_sentiments("bing") %>% 
+     mutate(lexicon = "bing", 
+            words_in_lexicon = n_distinct(word))    
+
+# Lexicon nrc
+nrc <- get_sentiments("nrc") %>% 
+     mutate(lexicon = "nrc", 
+            words_in_lexicon = n_distinct(word))
+
+# Unimos los tres lexicon
+new_sentiments <- bind_rows(afinn, bing, nrc)
+
+#Mostramos la información en una tabla personalizada
+new_sentiments %>%
+  group_by(lexicon, sentiment, words_in_lexicon) %>%
+  summarise(distinct_words = n_distinct(word)) %>%
+  ungroup() %>%
+  spread(sentiment, distinct_words) %>%
+  mutate(lexicon = color_tile("lightsalmon", "lightsalmon")(lexicon),
+         words_in_lexicon = color_bar("lemonchiffon")(words_in_lexicon)) %>%
+  my_kable_styling(caption = "Palabras en cada lexicon")
+```
+
+La tabla nos da una primera idea de qué contiene cada lexicon y cómo está estructurado:
+- El lexicon *AFINN* es el que menor número de palabras contiene (2477) de los tres, siendo mayoritarias las palabras negativas.
+- El lexicon *Bing* contiene el mayor número de palabras (6783), siendo mayoritarias las palabras positivas (hay el doble que de negativas)
+-El lexicon *NRC* contiene aproximadamente 300 palabras menos que el anterior (6468) repartidas en diferentes sentimientos. El número mayoritario de palabras están catalogadas como negativas. 
+
+Ahora aplicamos esta información a las reseñas, utilizando el dataset tokenizado y limpio **google_filtered** que habíamos creado previamente. Además, utilizando el código de Datacamp mencionado anteriormente, podemos calcular un ratio en función del número total de palabras en el lexicon dividido entre el número de palabras en las reseñas.
+
+
+```{r message=FALSE, warning=FALSE}
+# Palabras que contienen los lexicon y están en las reseñas
+google_filtered %>%
+  mutate(words_in_reviews = n_distinct(word)) %>%
+  inner_join(new_sentiments) %>%
+  group_by(lexicon, words_in_reviews, words_in_lexicon) %>%
+  summarise(lex_match_words = n_distinct(word)) %>%
+  ungroup() %>%
+  mutate(total_match_words = sum(lex_match_words), #No se usa, pero está bien tenerlo.
+         match_ratio = lex_match_words / words_in_reviews) %>%
+  select(lexicon, lex_match_words,  words_in_reviews, match_ratio) %>%
+  mutate(lex_match_words = color_bar("lemonchiffon")(lex_match_words),
+         lexicon = color_tile("lightsalmon", "lightsalmon")(lexicon)) %>%
+  my_kable_styling(caption = "Palabras de las reseñas encontradas en los lexicon")
+```
+
+Tal y como puede verse en la tabla, el lexicon **NRC**, es el que contiene más palabras distintas de las reseñas. No obstante, los ratios no son muy elevados en ninguno de los tres casos, ya que los lexicon no contienen todas las palabras que están en las reseñas ni todas ellas están asociadas a un sentimiento. Además, puede existir dependencia de la forma de la palabra y que no se esté teniendo en cuenta que, por ejemplo,la  palabra *fun*, hace referencia a lo mismo (en cuanto a sentimientos) que la palabra *funny*. 
+
+Vamos a centrarnos en el lexicon que más palabras contiene de las reseñas (nrc) y el binario (bing).
+
+
+```{r}
+# Creamos el df del lexicon junto con las reseñas tokenizadas
+google_nrc <- google_filtered %>%  # NRC
+  inner_join(get_sentiments("nrc"))
+
+google_bing <- google_filtered %>%  # Bing
+  inner_join(get_sentiments("bing"))
+
+```
+
+```{r}
+# Gráfico NRC
+nrc_plot <- google_nrc %>% 
+  group_by(sentiment)%>% 
+  summarise(word_count = n()) %>%
+  ungroup() %>%
+  mutate(sentiment = reorder(sentiment, word_count)) %>%
+    ggplot(aes(sentiment, word_count, fill = -word_count)) +
+  geom_col() +
+  guides(fill = FALSE) + 
+  labs(x = NULL, y = "Nº palabras") +
+  scale_y_continuous(limits = c(0, 15000)) +
+  ggtitle("Sentimientos en las reseñas con lexicon NRC") +
+  coord_flip()
+
+plot(nrc_plot)
+
+```
+
+Utilizando el lexicon **NRC**, el mayor número de palabras en las reviews se han clasificado como positivas, seguido por las negativas y las de "confianza". 
+
+```{r}
+# Gráfico bing
+bing_plot <- google_bing %>%
+  group_by(sentiment) %>%
+  summarise(word_count = n()) %>%
+  ungroup() %>%
+  mutate(sentiment = reorder(sentiment, word_count)) %>%
+  ggplot(aes(sentiment, word_count, fill = sentiment)) +
+  geom_col() +
+  guides(fill = FALSE) +
+  labs(x = NULL, y = "Nº palabras") +
+  scale_y_continuous(limits = c(0, 8000)) +
+  ggtitle("Sentimientos en las reseñas con lexicon Bing") +
+  coord_flip()
+
+plot(bing_plot)
+```
+
+Con el lexicon binario **Bing**, podemos encontrar discrepancias respecto a lo anterior. Vemos que más o menos hay el mismo número de palabras clasificadas como negativas que como positivas, siendo las negativas algo mayoritarias. 
+
+Con el código proporcionado por Sara Locatelli en "Welcome to Sentiment Analysis with Hotel California", vemos 10 palabras que forman parte de cada sentimiento clasificado por el lexicon NRC. 
+
+```{r}
+library(ggrepel)
+# Definimos el contenido del gráfico 
+plot_words <- google_nrc%>%
+  group_by(sentiment) %>%
+  count(word, sort = TRUE) %>%
+  arrange(desc(n)) %>%
+  slice(seq_len(10)) %>%
+  ungroup()
+
+# Definimos características del gráfico
+plot_words %>%
+  ggplot(aes(word, 1, label = word, fill = sentiment)) +
+  geom_point(color = "transparent") +
+  geom_label_repel(force = 1, nudge_y = 0.5,
+                   direction = "y",
+                   box.padding = 0.05,
+                   segment.color = "transparent",
+                   size = 3) +
+  facet_grid(~sentiment) +
+   theme(axis.text.y = element_blank(), axis.text.x = element_blank(),
+        axis.title.x = element_text(size = 6),
+        panel.grid = element_blank(), panel.background = element_blank(),
+        panel.border = element_rect("lightgray", fill = NA),
+        strip.text.x = element_text(size = 9)) +
+  xlab(NULL) + ylab(NULL) +
+  ggtitle("Palabras en las reseñas clasificadas por NRC Sentiment") +
+  coord_flip()
+```
+
+En este gráfico se puede ver cómo ciertas palabras están presentes en varios sentimientos, como por ejemplo, la palabra watch  aparece tanto en anticipación como en miedo. 
+Este lexicón contiene muchas palabras y parece clasificar muchas de las que aparecen en las reseñas de google. No obstante, vamos a explorar otros análisis para comprobar si podemos ajustar el análisis o si encontramos algunas diferencias. 
+
+Utilizamos el algoritmo de clasificación de **Bayes** del paquete *sentiment*. 
+
+```{r}
+# Clasificación de emociones
+google_class_emo <- classify_emotion(google_filtered$word, algorithm = "bayes", prior = 1.0)
+```
+
+```{r}
+# Primeros datos de la clasificación
+head(google_class_emo)
+```
+
+El algoritmo nos proporciona una columna llamada **Best_fit** que será la que guardemos en  una nueva variable.
+
+```{r}
+# Guardamos en el objeto emotion
+emotion <- google_class_emo[, 7]
+
+# Sustituimos NA por unknown
+emotion[is.na(emotion)] <- "unknown"
+
+# Lo vemos en una tabla
+table(emotion, useNA = 'ifany')
+```
+
+Podemos ver que hay un elevado número de reseñas que el algoritmo no ha conseguido clasificar. Obtenemos un gráfico de esta clasificación.
+
+
+```{r}
+# Gráfico
+graph_emo <- ggplot(as.data.frame(google_class_emo), aes(x = BEST_FIT)) +
+ geom_bar() + labs(title = 'Sentimientos Reseñas App Google') + 
+  geom_bar(aes(y = ..count.., fill = emotion)) +
+  scale_fill_brewer(palette = "Dark2")
+graph_emo
+```
+
+Podemos ver que lo que más destaca son las reseñas a las que el algoritmo no ha sabido asignar ninguna de las emociones. La segunda que más aparece es alegría.  
+Ahora obtenemos la polaridad: 
+
+```{r}
+# Polaridad
+google_class_pol <- classify_polarity (google_filtered$word, algorithm = "bayes")
+
+# Mostramos los primeros datos
+head(google_class_pol, 3)
+```
+
+```{r}
+# Guardamos el objeto polaridad
+polarity <- google_class_pol[, 4]
+
+# Lo vemos en una tabla
+table(polarity, useNA = 'ifany')
+```
+
+Utilizando la polaridad hay un mayor número de palabras positivas que negativas, no obstante, no se ha clasificado ninguna como neutra. 
+
+
+```{r}
+# Gráfico
+graph_pol <- ggplot(as.data.frame(google_class_pol), aes(x = BEST_FIT)) +
+ geom_bar() + labs(title = 'Polaridad Reseñas App Google') + 
+  geom_bar(aes(y = ..count.., fill = polarity)) +
+  scale_fill_brewer(palette = "Dark2")
+graph_pol
+```
+
+Las reseñas en su mayoría han sido clasificadas como positivas.
+
+## Bigramas
+
+Muchas veces, por el hecho de tratar cada palabra por separado, podemos estar perdiendo información sobre el contexto de la frase, por lo que, exploraremos las relaciones entre pares de palabras. Para ello, usaremos nuestro dataset limpio **google2**, previo a la tokenización. Ya había sido pasado a minúsculas y creado una columna id cuando realizamos los UPOS, no obstante, por si acaso, lo podemos volver a ejecutar.
+
+```{r}
+# Pasamos a minúsculas 
+google2$Review <- sapply(google2$Review, tolower)
+
+# Columna id
+google2$id <- rownames(google2)
+
+```
+
+
+```{r}
+# Creamos los bigramas
+google_bigrams <- google2 %>%
+  unnest_tokens(bigram, Review, token = "ngrams", n = 2)
+
+# Separamos cada palabra en una columna para filtrar
+bigrams_separated <- google_bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+# Realizamos una pequeña limpieza
+bigrams_filtered <- bigrams_separated %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>%
+  filter(!word1 %in% undesirable_words) %>%
+  filter(!word2 %in% undesirable_words) 
+
+
+```
+
+Filtramos por aplicación y especificamos que ambas palabras sean diferentes y que no sean NA.
+
+```{r}
+# Filtramos
+bigram_app <- bigrams_filtered %>%
+  filter(word1 != word2) %>%
+  filter(App != "NA") %>%
+  filter(word1 != "NA") %>%
+  filter(word2 != "NA") %>%
+  unite(bigram, word1, word2, sep = " ") %>%
+  inner_join(google2) %>%
+  count(bigram, App, sort = TRUE) %>%
+  group_by(App) %>%
+  slice(seq_len(7)) %>%
+  ungroup() %>%
+  arrange(App, n) %>%
+  mutate(row = row_number())
+```
+
+Creamos el gráfico especificando los 28 primeros bigramas.
+
+```{r}
+# Gráficos
+bigram_app [1:28,] %>%
+  ggplot(aes(row, n, fill = App)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~App, scales = "free_y") +
+  xlab(NULL) + ylab(NULL) +
+  scale_x_continuous(  # This handles replacement of row
+      breaks = bigram_app$row, # Notice need to reuse data frame
+      labels = bigram_app$bigram) +
+  theme(panel.grid.major.x = element_blank()) +
+  ggtitle("Bigramas por App") +
+  coord_flip()
+```
+
+Vemos cuatro aplicaciones y los bigramas correspondientes a sus reviews. Quizá sería conveniente realizar una limpieza más profunda para poder sacar en claro más información de los bigramas. 
+
+## TF-IDF
+
+Como último análisis de las reseñas, vamos a utilizar la frecuencia de términos (Term Frecuency) y la inversa del documento de frecuencias (Inverso Document Frecuency). La idea del tf-idf es encontrar palabras importantes dentro del contenido de cada documento. El procedimento es aplicar unos pesos menores a las palabras más comunes y pesos mayores a aquellas palabras que son diferentes a lo largo de los documentos y que hacen que se diferencien unos de otros. En resumen, nos permite contextualizar las palabras más importantes dependiendo de dónde se encuentren. 
+Como habíamos comentado, el paquete **tidytext** nos permite realizar este procedimiento con la función *bind_tf_idf*.
+
+
+```{r}
+# Frencuencia de términos por reseña
+reviews_words <- google_filtered %>%
+        count(Category, word, sort = TRUE) %>%
+        ungroup()
+
+# Agrupamos por categoría y contamos el número de palabras 
+categories_words <- reviews_words %>%
+        group_by(Category) %>%
+        summarise(total = sum(n))
+
+# Unimos las palabras por reseña y por categoría
+reviews_words <- left_join(reviews_words, categories_words)
+
+# Mostramos el resultado en una tabla
+my_kable_styling(head(reviews_words), "Palabras por categoría")
+```
+
+Por ejemplo, la palabra **ad** dentro de la categoría de App "Family", aparece 10 veces. A lo largo de todas las reseñas aparece 1834 veces.
+
+```{r}
+# Creamos tf_idf
+reviews_words <- reviews_words %>%
+        bind_tf_idf(word, Category, n)
+
+# Mostramos el resultado en una tabla
+my_kable_styling(head(reviews_words), "Inverse Document Frequency and Tf-idf")
+```
+
+Vemos que aquellas palabras que tienen un valor bajo para *tf*, tienen a su vez, un valor alto para *idf*. Vemos esta información ordenada de mayor a menor según su valor de tf-idf. 
+
+```{r}
+# Ordenamos de forma descendente y eliminamos la columna total
+ordered_reviews_words <- reviews_words %>%
+        select(-total) %>%
+  arrange(desc(tf_idf))
+# Mostramos la información en una tabla
+my_kable_styling(head(ordered_reviews_words), "Palabras ordenadas descendentemente según tf-idf")
+```
+
+Vemos que las primeras palabras son menos comunes pertenecen a la categoría de "Comics", todas ellas aparecen una sola vez. Por último, vemos algunas de las palabras que resultan más relevantes pertenecientes a diferentes categorías. 
+
+```{r}
+# Gráfico
+reviews_words[1:50,]%>%
+  group_by(Category) %>%
+  slice_max(tf_idf, n = 5) %>%
+  ungroup() %>%
+  ggplot(aes(tf_idf, fct_reorder(word, tf_idf), fill = Category)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~Category, ncol = 2, scales = "free") +
+  labs(x = "tf-idf", y = NULL)
+```
+
+Vemos, por ejemplo, que en la categoría de "Entretenimiento" la palabra que resulta más relevante es *movie*. 
+Todo esto nos proporciona un contexto específico acerca de las palabras más usadas en las reseñas en cada categoría y podría servir de orientación tanto a los desarrolladores de las aplicaciones, como a Google Play para saber, entre otras cosas, dónde catalogar cada aplicación correctamente, lo que la gente opina y a lo que da más valor dentro de las categorías de aplicaciones, ya que no se demandará lo mismo si el interés se centra en juegos que si está más enfocado a las finanzas. 
+
+Aquí finalizamos las sesión de R y obtenemos la información al respecto. 
+
+```{r}
+# Terminamos la sesión 
+session_info()
+```
+
+## Referencias
+
+* [Text Mining: Term vs. Document Frequency](http://uc-r.github.io/tf-idf_analysis)
+* [Post by Debbie Liske](https://www.datacamp.com/community/tutorials/sentiment-analysis-R), mentioned earlier, for her code and custom functions to make my charts pretty.
+* [Google Play Store Apps: Kaggle](https://www.kaggle.com/lava18/google-play-store-apps)
+* [R Documentation](https://www.rdocumentation.org/)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
